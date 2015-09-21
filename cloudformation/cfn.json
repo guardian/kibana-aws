@@ -1,0 +1,252 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+
+    "Description": "Dashboard (Kibana 4) for Discussion product metrics",
+
+    "Parameters": {
+        "Stage": {
+            "Description": "Environment name",
+            "Type": "String",
+            "Default": "CODE"
+        },
+        "Stack": {
+            "Description": "Stack name",
+            "Type": "String"
+        },
+        "ElasticsearchHost": {
+            "Description": "Elasticsearch internal ELB - do not preface with http://",
+            "Type": "String"
+        },
+        "ElasticsearchSecurityGroup": {
+            "Description": "SG ID for the ES cluster to connect to (to provide access)",
+            "Type": "String"
+        },
+        "VpcId": {
+            "Description": "ID of the VPC onto which to launch the application eg. vpc-1234abcd",
+            "Type": "String"
+        },
+        "PublicVpcSubnets": {
+            "Description": "Subnets to use in VPC for public internet-facing ELB eg. subnet-abcd1234",
+            "Type": "CommaDelimitedList"
+        },
+        "PrivateVpcSubnets" : {
+            "Description": "Subnets to use in VPC for private EC2 instances eg. subnet-abcd1234",
+            "Type": "CommaDelimitedList"
+        },
+        "CookieSecret": {
+            "Description": "Secret used to sign the session ID cookie ie. any random string",
+            "Type": "String",
+            "NoEcho": true
+        },
+        "GoogleOAuthClientId": {
+            "Description": "Google OAuth 2.0 Client ID",
+            "Type": "String"
+        },
+        "GoogleOAuthClientSecret": {
+            "Description": "Google OAuth 2.0 Client Secret",
+            "Type": "String",
+            "NoEcho": true
+        },
+        "AllowedDomain": {
+            "Description": "Google apps domain eg. gmail.com or example.com, for Google auth",
+            "Type": "String"
+        },
+        "HostedZoneName": {
+            "Description": "Route53 Hosted Zone in which kibana aliases will be created (without the trailing dot). Leave blank for no ALIAS.",
+            "Type": "String",
+            "AllowedPattern": "^(.*[^.]|)$"
+        }
+    },
+
+    "Resources": {
+        "ElasticLoadBalancer": {
+            "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+            "Properties": {
+                "CrossZone": true,
+                "Listeners": [
+                    {
+                        "Protocol": "HTTP",
+                        "LoadBalancerPort": "80",
+                        "InstancePort": "8080"
+                    }
+                ],
+                "HealthCheck": {
+                    "Target": "HTTP:8080/__es/",
+                    "Timeout": "10",
+                    "Interval": "20",
+                    "UnhealthyThreshold": "10",
+                    "HealthyThreshold": "2"
+                },
+                "Subnets": { "Ref": "PublicVpcSubnets" },
+                "SecurityGroups": [
+                    { "Ref": "ElasticLoadBalancerSecurityGroup" }
+                ]
+            }
+        },
+        "AppServerGroup": {
+            "Type": "AWS::AutoScaling::AutoScalingGroup",
+            "Properties": {
+                "AvailabilityZones": { "Fn::GetAZs": "" },
+                "VPCZoneIdentifier": { "Ref": "PrivateVpcSubnets" },
+                "LaunchConfigurationName": { "Ref": "LaunchConfig" },
+                "MinSize": 1,
+                "MaxSize": 2,
+                "HealthCheckType": "ELB",
+                "HealthCheckGracePeriod": 300,
+                "LoadBalancerNames": [ { "Ref": "ElasticLoadBalancer" } ],
+                "Tags": [
+                    {
+                        "Key": "Stage",
+                        "Value": { "Ref": "Stage" },
+                        "PropagateAtLaunch": "true"
+                    },
+                    {
+                        "Key": "Stack",
+                        "Value": { "Ref": "Stack" },
+                        "PropagateAtLaunch": "true"
+                    },
+                    {
+                        "Key": "App",
+                        "Value": "dashboard",
+                        "PropagateAtLaunch": "true"
+                    },
+                    {
+                        "Key": "Name",
+                        "Value": { "Fn::Join": [ ":", [ { "Ref": "Stage" }, "discussion-dashboard" ] ] },
+                        "PropagateAtLaunch": "true"
+                    }
+                ]
+            }
+        },
+        "LaunchConfig": {
+            "Type": "AWS::AutoScaling::LaunchConfiguration",
+            "Properties": {
+                "ImageId": "ami-b7443fc0",
+                "SecurityGroups": [
+                    { "Ref": "AppSecurityGroup" },
+                    { "Ref": "ElasticsearchSecurityGroup" }
+                ],
+                "InstanceType": "t2.medium",
+                "KeyName": "aws-discussion",
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": [ "\n", [
+                            "#!/bin/bash -v",
+
+                            "# Update repositories",
+
+                            "add-apt-repository -y ppa:chris-lea/node.js",
+                            "sleep 1",
+                            "apt-get -y update",
+                            "apt-get -y install nodejs npm",
+
+                            "# Install Kibana",
+
+                            "wget -O /tmp/kibana-latest.tar.gz https://download.elastic.co/kibana/kibana/kibana-4.1.0-linux-x64.tar.gz",
+                            "tar zxf /tmp/kibana-latest.tar.gz -C /opt",
+                            "mv /opt/kibana-* /opt/kibana",
+
+                            "# Install Logcabin",
+
+                            "wget -O /tmp/elk-stack.tar.gz https://github.com/guardian/elk-stack/archive/master.tar.gz",
+                            "tar zxf /tmp/elk-stack.tar.gz -C /tmp",
+                            "mv /tmp/elk-stack-master/src /opt/logcabin",
+                            "adduser --disabled-password --gecos \"\" logcabin",
+                            "cd /opt/logcabin && npm install && cd ..",
+                            "chown -R logcabin /opt/logcabin",
+
+                            "wget -O /opt/logcabin/config.js https://raw.githubusercontent.com/guardian/elk-stack/master/config/config.js",
+                            { "Fn::Join": [ "", [ "sed -i",
+                                                  " -e s,@@LOGCABIN_HOST,",
+                                                  { "Fn::Join": [".", [ "kibana", {"Ref": "HostedZoneName"} ]] },
+                                                  ",g",
+                                " -e s,@@COOKIE_SECRET,", { "Ref": "CookieSecret" }, ",g",
+                                " -e s,@@CLIENT_ID,", { "Ref": "GoogleOAuthClientId" }, ",g",
+                                " -e s,@@CLIENT_SECRET,", { "Ref": "GoogleOAuthClientSecret" }, ",g",
+                                " -e s,@@ALLOWED_DOMAIN,", { "Ref": "AllowedDomain" }, ",g",
+                                " /opt/logcabin/config.js" ] ] },
+
+                            "# Start services",
+
+                            "wget -O /etc/systemd/system/logcabin.service https://raw.githubusercontent.com/guardian/elk-stack/master/config/systemd-logcabin.service",
+                            "wget -O /etc/systemd/system/kibana.service https://raw.githubusercontent.com/guardian/elk-stack/master/config/systemd-kibana.service",
+                            "systemctl start kibana && systemctl enable kibana",
+                            "systemctl start logcabin && systemctl enable logcabin"
+                        ] ]
+                    }
+                }
+            }
+        },
+
+        "ElasticLoadBalancerSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "VpcId": { "Ref": "VpcId" },
+                "GroupDescription": "Allow access to kibana on public ELB from internet",
+                "SecurityGroupIngress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "80",
+                        "ToPort": "80",
+                        "CidrIp": "0.0.0.0/0"
+                    }
+                ],
+                "SecurityGroupEgress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "8080",
+                        "ToPort": "8080",
+                        "CidrIp": "0.0.0.0/0"
+                    }
+                ]
+            }
+        },
+
+        "AppSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Allow ELB access (for Kibana) over port 8080, also ssh",
+                "VpcId": { "Ref": "VpcId" },
+                "SecurityGroupIngress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "8080",
+                        "ToPort": "8080",
+                        "SourceSecurityGroupId": { "Ref": "ElasticLoadBalancerSecurityGroup" }
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "22",
+                        "ToPort": "22",
+                        "CidrIp": "0.0.0.0/0"
+                    }
+                ]
+            }
+        },
+
+        "KibanaAlias": {
+            "Type" : "AWS::Route53::RecordSetGroup",
+            "Properties" : {
+                "HostedZoneName" : { "Fn::Join": ["", [{ "Ref" : "HostedZoneName" }, "."]] },
+                "Comment" : "Alias to Dashboard",
+                "RecordSets" : [
+                    {
+                        "Name" : { "Fn::Join": [".", [ "dashboard", {"Ref": "HostedZoneName"} ]] },
+                        "Type" : "A",
+                        "AliasTarget" : {
+                            "HostedZoneId" : { "Fn::GetAtt" : ["ElasticLoadBalancer", "CanonicalHostedZoneNameID"] },
+                            "DNSName" : { "Fn::GetAtt" : ["ElasticLoadBalancer","DNSName"] }
+                        }
+                    }
+                ]
+            }
+        }
+    },
+
+    "Outputs": {
+        "DashboardURL": {
+            "Value": { "Fn::Join": ["", ["http://", { "Fn::Join": [".", [ "dashboard", {"Ref": "HostedZoneName"} ]] } ] ] },
+            "Description": "URL for the Kibana Dashboard"
+        }
+    }
+}
