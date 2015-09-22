@@ -150,14 +150,14 @@
 
                             "wget -O /tmp/kibana-aws.tar.gz https://github.com/guardian/kibana-aws/archive/master.tar.gz",
                             "tar zxf /tmp/kibana-aws.tar.gz -C /tmp",
-                            "mv /tmp/kibana-aws/src /opt/logcabin",
+                            "mv /tmp/kibana-aws-master/src /opt/logcabin",
                             "adduser --disabled-password --gecos \"\" logcabin",
                             "cd /opt/logcabin && npm install && cd ..",
                             "chown -R logcabin /opt/logcabin",
 
                             "# Configure Kibana",
 
-                            "mv /tmp/kibana-aws/kibana.yml /opt/kibana/config/kibana.yml",
+                            "mv /opt/logcabin/kibana.yml /opt/kibana/config/kibana.yml",
 
                             { "Fn::Join": [ "", [ "sed -i",
                                                   " -e s,@@ES_HOST,", { "Ref": "ElasticsearchHost" }, ",g",
