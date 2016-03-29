@@ -138,6 +138,7 @@
                             "add-apt-repository -y ppa:chris-lea/node.js",
                             "sleep 1",
                             "apt-get -y update",
+                            "apt-get -y upgrade",
                             "apt-get -y install nodejs npm",
 
                             "# Install Kibana",
